@@ -24,6 +24,54 @@
 #include <sensor_msgs/PointField.h>
 #include <sensor_msgs/point_cloud2_iterator.h>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+#define ATRACE_MESSAGE_LEN 256
+int     atrace_marker_fd = -1;
+
+void trace_init()
+{
+  atrace_marker_fd = open("/sys/kernel/debug/tracing/trace_marker", O_WRONLY);
+  if (atrace_marker_fd == -1)   { /* do error handling */ }
+}
+
+inline void trace_begin(const char *name)
+{
+    char buf[ATRACE_MESSAGE_LEN];
+    int len = snprintf(buf, ATRACE_MESSAGE_LEN, "B|%d|%s", getpid(), name);
+    write(atrace_marker_fd, buf, len);
+}
+
+inline void trace_end()
+{
+    char c = 'E';
+    write(atrace_marker_fd, &c, 1);
+}
+
+inline void trace_counter(const char *name, const int value)
+{
+    char buf[ATRACE_MESSAGE_LEN];
+    int len = snprintf(buf, ATRACE_MESSAGE_LEN, "C|%d|%s|%i", getpid(), name, value);
+    write(atrace_marker_fd, buf, len);
+}
+
+inline void trace_async_begin(const char *name, const int32_t cookie)
+{
+    char buf[ATRACE_MESSAGE_LEN];
+    int len = snprintf(buf, ATRACE_MESSAGE_LEN, "S|%d|%s|%i", getpid(), name, cookie);
+    write(atrace_marker_fd, buf, len);
+}
+
+inline void trace_async_end(const char *name, const int32_t cookie)
+{
+    char buf[ATRACE_MESSAGE_LEN];
+    int len = snprintf(buf, ATRACE_MESSAGE_LEN, "F|%d|%s|%i", getpid(), name, cookie);
+    write(atrace_marker_fd, buf, len);
+}
+
+
 namespace {
 // This function routes onPoseAvailable callback to the application object for
 // handling.
@@ -496,6 +544,10 @@ TangoErrorType TangoRosNode::TangoConnect() {
   if (result != TANGO_SUCCESS) {
     LOG(ERROR) << function_name
         << ", TangoService_connectOnFrameAvailable TANGO_CAMERA_FISHEYE error: " << result;
+
+   //init tracing
+   trace_init();
+
     return result;
   }
 
@@ -643,6 +695,8 @@ void TangoRosNode::OnPointCloudAvailable(const TangoPointCloud* point_cloud) {
 }
 
 void TangoRosNode::OnFrameAvailable(TangoCameraId camera_id, const TangoImageBuffer* buffer) {
+  trace_begin("OnFrameAvailable");
+
   if ((publisher_config_.publish_camera & CAMERA_FISHEYE) &&
        camera_id == TangoCameraId::TANGO_CAMERA_FISHEYE &&
        fisheye_image_available_mutex_.try_lock()) {
@@ -665,6 +719,7 @@ void TangoRosNode::OnFrameAvailable(TangoCameraId camera_id, const TangoImageBuf
     color_image_available_.notify_all();
     color_image_available_mutex_.unlock();
   }
+  trace_end();
 }
 
 void TangoRosNode::StartPublishing() {
