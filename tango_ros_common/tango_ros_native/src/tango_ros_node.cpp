@@ -24,6 +24,11 @@
 #include <sensor_msgs/PointField.h>
 #include <sensor_msgs/point_cloud2_iterator.h>
 
+#include <tango_support_api/tango_support_api.h>
+
+#include <pcl/common/eigen.h>
+#include "tango_ros_native/codec.h"
+
 namespace {
 // This function routes onPoseAvailable callback to the application object for
 // handling.
@@ -112,6 +117,7 @@ void toPointCloud2(const TangoPointCloud& tango_point_cloud,
   }
   point_cloud->header.stamp.fromSec(tango_point_cloud.timestamp + time_offset);
 }
+
 // Convert a point to a laser scan range.
 // Method taken from the ros package 'pointcloud_to_laserscan':
 // http://wiki.ros.org/pointcloud_to_laserscan
@@ -180,6 +186,40 @@ void toLaserScan(const TangoPointCloud& tango_point_cloud,
   }
   laser_scan->header.stamp.fromSec(tango_point_cloud.timestamp + time_offset);
 }
+
+
+//convert tango pose to glm matrix
+/*glm::mat4 GetMatrixFromPose(const TangoPoseData* pose_data) {
+  glm::vec3 translation =
+      glm::vec3(pose_data->translation[0], pose_data->translation[1],
+                pose_data->translation[2]);
+  glm::quat rotation =
+      glm::quat(pose_data->orientation[3], pose_data->orientation[0],
+                pose_data->orientation[1], pose_data->orientation[2]);
+  return glm::translate(glm::mat4(1.0f), translation) *
+         glm::mat4_cast(rotation);
+}*/
+
+cv::Mat GetMatrixFromPose(const TangoPoseData* pose_data) {
+    float x = pose_data->translation[0];
+    float y = pose_data->translation[1];
+    float z = pose_data->translation[2];
+    float qx = pose_data->translation[0];
+    float qy = pose_data->translation[1];
+    float qz = pose_data->translation[2];
+    float qw = pose_data->translation[3];
+
+    Eigen::Matrix3f rotation = Eigen::Quaternionf(qw,qx,qy,qz).toRotationMatrix();
+    cv::Mat pose = (cv::Mat_<float>(4,4) <<
+                                         rotation(0,0), rotation(0,1), rotation(0,2), x,
+                                         rotation(1,0), rotation(1,1), rotation(1,2), y,
+                                         rotation(2,0), rotation(2,1), rotation(2,2), z,
+                                         0.0f, 0.0f, 0.0f, 1.0f);
+
+    return pose;
+}
+
+
 // Converts a TangoCoordinateFrameType to a ros frame ID i.e. a string.
 // @param tango_frame_type, TangoCoordinateFrameType to convert.
 // @return returns the corresponding frame id.
@@ -226,6 +266,74 @@ std::string toFrameId(const TangoCoordinateFrameType& tango_frame_type) {
   }
   return string_frame_type;
 }
+
+void toDepthImage(const TangoPointCloud& tango_point_cloud,
+                            double last_color_timestamp,
+                            double time_offset,
+                            sensor_msgs::Image* depth_image,
+                            image_geometry::PinholeCameraModel* color_camera_model) {
+
+    TangoPoseData pose_color_image_t1_T_depth_image_t0;
+    TangoErrorType retval;
+    //get the relative pose between pointcloud and color camera
+  if (TangoSupport_calculateRelativePose(
+                                         last_color_timestamp, TANGO_COORDINATE_FRAME_CAMERA_COLOR, tango_point_cloud.timestamp,
+                                         TANGO_COORDINATE_FRAME_CAMERA_DEPTH,
+                                         &pose_color_image_t1_T_depth_image_t0) != TANGO_SUCCESS) {
+    LOG(ERROR) << "SynchronizationApplication: Could not find a valid relative pose at "
+               <<"time for color and "
+               << " depth cameras.";
+    return;
+  }
+
+  double scale_factor = 1.0/8.0;
+  cv::Mat color_image_t1_T_depth_image_t0 = GetMatrixFromPose(&pose_color_image_t1_T_depth_image_t0);
+  int point_cloud_size = tango_point_cloud.num_points;
+  int image_width = 1920 * scale_factor; //color_camera_model->width();
+  int image_height = 1080 * scale_factor; //color_camera_model->height();
+  int image_size = image_height * image_width;
+
+  depth_image->data.resize(image_size*4);
+  std::fill(depth_image->data.begin(), depth_image->data.end(), 0);
+  //
+  cv::Mat depth_matrix = cv::Mat(image_height, image_width, CV_32FC1, &depth_image->data[0]);
+  int n = 0;
+  for (int i = 0; i < point_cloud_size; ++i) {
+      float x = -tango_point_cloud.points[i][0];
+      float y = -tango_point_cloud.points[i][1];
+      float z = tango_point_cloud.points[i][2];
+      //pint in depth camera frame
+      cv::Mat pd = (cv::Mat_<float>(4, 1) << x, y, z, 1.0f);
+      //point in color camera frame
+      cv::Mat pc = color_image_t1_T_depth_image_t0*pd;
+      cv::Point3f pc3f(pc.at<float>(0,0),pc.at<float>(1,0),pc.at<float>(2,0));
+      //project the point to pixel
+      cv::Point2d pixel = color_camera_model->project3dToPixel(pc3f);
+      int pixel_x, pixel_y;
+      // get the coordinate on image plane and depth
+      pixel_x = static_cast<int>(pixel.x * scale_factor);
+      pixel_y = static_cast<int>(pixel.y * scale_factor);
+      float depth_value = pc.at<float>(2,0);
+
+      //load the value in the depth image
+
+      if (pixel_x > image_width || pixel_y > image_height || pixel_x < 0 || pixel_y < 0){
+        continue;
+      }
+      depth_matrix.at<float>(pixel_y, pixel_x) = depth_value;
+      n++;
+   }
+
+   depth_image->header.stamp.fromSec(last_color_timestamp + time_offset);
+   depth_image->header.seq = 1;
+   depth_image->header.frame_id = toFrameId(TANGO_COORDINATE_FRAME_CAMERA_COLOR);
+   depth_image->height = image_height;
+   depth_image->width = image_width;
+   depth_image->encoding = "32FC1";
+   depth_image->is_bigendian = 0;
+   depth_image->step = image_width * 4;//sizeof(float);
+}
+
 // Converts TangoCameraIntrinsics to sensor_msgs::CameraInfo.
 // See Tango documentation:
 // http://developers.google.com/tango/apis/unity/reference/class/tango/tango-camera-intrinsics
@@ -322,6 +430,15 @@ TangoRosNode::TangoRosNode() : run_threads_(false) {
   laser_scan_publisher_ =
       node_handle_.advertise<sensor_msgs::LaserScan>(
           publisher_config_.laser_scan_topic, queue_size, latching);
+   //depth image publisher
+   depth_image_publisher_ =
+         node_handle_.advertise<sensor_msgs::Image>(
+             publisher_config_.depth_image_topic, queue_size, latching);
+
+   //compressed depth image publisher
+   compressed_depth_image_publisher_ =
+         node_handle_.advertise<sensor_msgs::CompressedImage>(
+             publisher_config_.compressed_depth_image_topic, queue_size, latching);
 
   image_transport_.reset(new image_transport::ImageTransport(node_handle_));
   try {
@@ -337,6 +454,7 @@ TangoRosNode::TangoRosNode() : run_threads_(false) {
     color_rectified_image_publisher_ =
         image_transport_->advertise(publisher_config_.color_rectified_image_topic,
                                    queue_size, latching);
+
   } catch (const image_transport::Exception& e) {
     LOG(ERROR) << "Error while creating image transport publishers" << e.what();
   }
@@ -369,6 +487,7 @@ TangoErrorType TangoRosNode::OnTangoServiceConnected() {
     return result;
   }
 
+  TangoSupport_initializeLibrary();
   PublishStaticTransforms();
   TangoCoordinateFramePair pair;
   pair.base = TANGO_COORDINATE_FRAME_START_OF_SERVICE;
@@ -614,6 +733,8 @@ void TangoRosNode::OnPoseAvailable(const TangoPoseData* pose) {
 
 void TangoRosNode::OnPointCloudAvailable(const TangoPointCloud* point_cloud) {
   if (point_cloud->num_points > 0) {
+    double last_color_timestamp = color_timestamp_;//keep the time stamp of the last (closest?) color image
+
     if (publisher_config_.publish_point_cloud && point_cloud_available_mutex_.try_lock()) {
       toPointCloud2(*point_cloud, time_offset_, &point_cloud_);
       point_cloud_.header.frame_id = toFrameId(TANGO_COORDINATE_FRAME_CAMERA_DEPTH);
@@ -639,6 +760,12 @@ void TangoRosNode::OnPointCloudAvailable(const TangoPointCloud* point_cloud) {
       laser_scan_available_.notify_all();
       laser_scan_available_mutex_.unlock();
     }
+
+    if(publisher_config_.publish_depth && depth_image_available_mutex_.try_lock()) {
+        toDepthImage(*point_cloud, last_color_timestamp, time_offset_, &depth_image_msg_, &color_camera_model_);
+        depth_image_available_.notify_all();
+        depth_image_available_mutex_.unlock();
+    }
   }
 }
 
@@ -646,6 +773,9 @@ void TangoRosNode::OnFrameAvailable(TangoCameraId camera_id, const TangoImageBuf
   if ((publisher_config_.publish_camera & CAMERA_FISHEYE) &&
        camera_id == TangoCameraId::TANGO_CAMERA_FISHEYE &&
        fisheye_image_available_mutex_.try_lock()) {
+
+    LOG(INFO) << "fisheye time stamp " << std::fixed << std::setprecision( 15 ) << buffer->timestamp;
+
     fisheye_image_ = cv::Mat(buffer->height + buffer->height / 2, buffer->width,
                              CV_8UC1, buffer->data, buffer->stride); // No deep copy.
     fisheye_image_header_.stamp.fromSec(buffer->timestamp + time_offset_);
@@ -657,6 +787,10 @@ void TangoRosNode::OnFrameAvailable(TangoCameraId camera_id, const TangoImageBuf
   if ((publisher_config_.publish_camera & CAMERA_COLOR) &&
        camera_id == TangoCameraId::TANGO_CAMERA_COLOR &&
        color_image_available_mutex_.try_lock()) {
+
+    //LOG(INFO) << "color time stamp " << std::fixed << std::setprecision( 15 ) << buffer->timestamp;
+    color_timestamp_ = buffer->timestamp;
+
     color_image_ = cv::Mat(buffer->height + buffer->height / 2, buffer->width,
                            CV_8UC1, buffer->data, buffer->stride); // No deep copy.
     color_image_header_.stamp.fromSec(buffer->timestamp + time_offset_);
@@ -674,6 +808,7 @@ void TangoRosNode::StartPublishing() {
   publish_laserscan_thread_ = std::thread(&TangoRosNode::PublishLaserScan, this);
   publish_fisheye_image_thread_ = std::thread(&TangoRosNode::PublishFisheyeImage, this);
   publish_color_image_thread_ = std::thread(&TangoRosNode::PublishColorImage, this);
+  publish_depth_image_thread_ = std::thread(&TangoRosNode::PublishDepthImage, this);
   ros_spin_thread_ = std::thread(&TangoRosNode::RunRosSpin, this);
 }
 
@@ -690,6 +825,8 @@ void TangoRosNode::StopPublishing() {
       publish_fisheye_image_thread_.join();
     if (publisher_config_.publish_camera & CAMERA_COLOR)
       publish_color_image_thread_.join();
+    if (publisher_config_.publish_depth)
+        publish_depth_image_thread_.join();
     ros_spin_thread_.join();
   }
 }
@@ -810,6 +947,37 @@ void TangoRosNode::PublishColorImage() {
           color_rectified_image_publisher_.publish(image_rect);
         }
       }
+    }
+  }
+}
+
+void TangoRosNode::PublishDepthImage() {
+  while(ros::ok()) {
+    if (!run_threads_) {
+      break;
+    }
+    {
+      std::unique_lock<std::mutex> lock(depth_image_available_mutex_);
+      depth_image_available_.wait(lock);
+      depth_image_publisher_.publish(depth_image_msg_);
+
+      double depth_max = 5.0;
+      double depth_quantization = 40.0;
+      int png_level = 3;
+
+        sensor_msgs::CompressedImage::Ptr compressed_image =
+                    compressed_depth_image_transport::encodeCompressedDepthImage(depth_image_msg_, depth_max, depth_quantization, png_level);
+
+        if(compressed_image)
+        {
+          compressed_depth_image_publisher_.publish(*compressed_image);
+          LOG(INFO) << "publishing compressed depth";
+        }
+        else
+        {
+            LOG(INFO) << "encodeCompressedDepthImage returned null ptr";
+        }
+      //LOG(INFO) << "TangoRosNode::PublishDepthImage(): " << std::fixed << std::setprecision( 15 ) << last_color_timestamp_;
     }
   }
 }

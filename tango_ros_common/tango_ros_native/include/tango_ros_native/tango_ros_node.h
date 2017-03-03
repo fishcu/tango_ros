@@ -39,6 +39,7 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 
 #include "tango_ros_native/PublisherConfig.h"
+#include <sensor_msgs/CompressedImage.h>
 
 namespace tango_ros_native {
 const std::string NODE_NAME = "tango";
@@ -64,6 +65,8 @@ struct PublisherConfiguration {
   std::atomic_bool publish_device_pose{false};
   // True if point cloud needs to be published.
   std::atomic_bool publish_point_cloud{false};
+  // True if depth image needs to be published.
+  std::atomic_bool publish_depth{true};
   // True if laser scan needs to be published.
   std::atomic_bool publish_laser_scan{false};
   // Flag corresponding to which cameras need to be published.
@@ -81,6 +84,10 @@ struct PublisherConfiguration {
   std::string color_image_topic = "tango/camera/color_1/image_raw";
   // Topic name for the color rectified image publisher.
   std::string color_rectified_image_topic = "tango/camera/color_1/image_rect";
+  //Topic name of the depth image publisher.
+  std::string depth_image_topic = "tango/depth";
+  //Topic name of the compressed depth image publisher.
+  std::string compressed_depth_image_topic = "tango/depth/compressedDepth";
   // Param name for the drift correction parameter.
   std::string enable_drift_correction_param = "tango/enable_drift_correction";
 };
@@ -125,6 +132,8 @@ class TangoRosNode {
   void PublishLaserScan();
   void PublishFisheyeImage();
   void PublishColorImage();
+  void PublishDepthImage();
+
   // Runs ros::spinOnce() in a loop to trigger subscribers callbacks (e.g. dynamic reconfigure).
   void RunRosSpin();
   // Function called when one of the dynamic reconfigure parameter is changed.
@@ -141,6 +150,8 @@ class TangoRosNode {
   std::thread publish_laserscan_thread_;
   std::thread publish_fisheye_image_thread_;
   std::thread publish_color_image_thread_;
+  std::thread publish_depth_image_thread_;
+
   std::thread ros_spin_thread_;
   std::atomic_bool run_threads_;
 
@@ -154,6 +165,8 @@ class TangoRosNode {
   std::condition_variable fisheye_image_available_;
   std::mutex color_image_available_mutex_;
   std::condition_variable color_image_available_;
+  std::mutex depth_image_available_mutex_;
+  std::condition_variable depth_image_available_;
 
   double time_offset_ = 0.; // Offset between tango time and ros time in s.
 
@@ -195,6 +208,15 @@ class TangoRosNode {
   cv::Mat color_image_;
   image_geometry::PinholeCameraModel color_camera_model_;
   cv::Mat color_image_rect_;
+
+  //depth image
+  std::atomic<double> color_timestamp_;
+  double last_color_timestamp_;
+  sensor_msgs::Image depth_image_msg_;
+  ros::Publisher depth_image_publisher_;
+
+  sensor_msgs::CompressedImage compressed_depth_image_msg_;
+  ros::Publisher compressed_depth_image_publisher_;
 };
 }  // namespace tango_ros_native
 #endif  // TANGO_ROS_NODE_H_
