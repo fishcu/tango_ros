@@ -9,6 +9,7 @@ find_package(catkin REQUIRED COMPONENTS
    roscpp
    sensor_msgs
    tango_client_api
+   tango_support_api
    tf
    tf2_ros
    )
@@ -22,7 +23,7 @@ generate_dynamic_reconfigure_options(
 
 catkin_package(
   INCLUDE_DIRS include
-  CATKIN_DEPENDS dynamic_reconfigure glog_catkin roscpp sensor_msgs tango_client_api tf tf2_ros
+  CATKIN_DEPENDS dynamic_reconfigure glog_catkin roscpp sensor_msgs tango_client_api tango_support_api tf tf2_ros
   LIBRARIES tango_ros_native
   DEPENDS OpenCV
   )
