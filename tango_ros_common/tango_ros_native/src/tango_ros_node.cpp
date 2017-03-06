@@ -27,27 +27,57 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <string.h>
+using namespace std;
+
+typedef struct {
+    string name;
+    double timestamp;
+    clock_t begin_time;
+} traceitem;
 
 #define ATRACE_MESSAGE_LEN 256
 int     atrace_marker_fd = -1;
+ofstream fp;
+std::vector<traceitem> tracearray;
+
+void trace_message(string name, int counter)
+{
+    struct timeval  tv1;
+    gettimeofday(&tv1, NULL);
+    double timestamp = tv1.tv_sec + tv1.tv_usec/1000000.0;
+    if (fp.is_open())
+        fp << "tracelog:"<< counter << ":" << name << ":" << std::setprecision(20) << timestamp << "\n";
+}
 
 void trace_init()
 {
-  atrace_marker_fd = open("/sys/kernel/debug/tracing/trace_marker", O_WRONLY);
-  if (atrace_marker_fd == -1)   { /* do error handling */ }
+    LOG(ERROR) << "trace_init()";
+  fp.open("/sdcard/log1.txt");
+  if (!fp.is_open())   {
+    LOG(ERROR) << "Error opening the trace log file";
+  }
 }
 
-inline void trace_begin(const char *name)
+inline void trace_begin(string name)
 {
-    char buf[ATRACE_MESSAGE_LEN];
-    int len = snprintf(buf, ATRACE_MESSAGE_LEN, "B|%d|%s", getpid(), name);
-    write(atrace_marker_fd, buf, len);
+    traceitem ti;
+    ti.name = name;
+    struct timeval  tv1;
+    gettimeofday(&tv1, NULL);
+    ti.timestamp = tv1.tv_sec + tv1.tv_usec/1000000.0;
+    ti.begin_time = clock();
+    tracearray.push_back(ti);
 }
 
 inline void trace_end()
 {
-    char c = 'E';
-    write(atrace_marker_fd, &c, 1);
+    time_t t = time(0);
+    traceitem ti = tracearray.back();
+    tracearray.pop_back();
+    //double seconds = difftime(time(0),ti.t);
+    LOG(ERROR) << "tracelog:"<< ti.name << ":" << std::setprecision(15) << ti.timestamp << ":" << float( clock () - ti.begin_time ) /  CLOCKS_PER_SEC;
+    //write(atrace_marker_fd, &c, 1);
 }
 
 inline void trace_counter(const char *name, const int value)
@@ -520,6 +550,9 @@ TangoErrorType TangoRosNode::TangoSetupConfig() {
 TangoErrorType TangoRosNode::TangoConnect() {
   const char* function_name = "TangoRosNode::TangoConnect()";
 
+  //init tracing
+  trace_init();
+
   TangoCoordinateFramePair pair;
   pair.base = TANGO_COORDINATE_FRAME_START_OF_SERVICE;
   pair.target = TANGO_COORDINATE_FRAME_DEVICE;
@@ -544,9 +577,6 @@ TangoErrorType TangoRosNode::TangoConnect() {
   if (result != TANGO_SUCCESS) {
     LOG(ERROR) << function_name
         << ", TangoService_connectOnFrameAvailable TANGO_CAMERA_FISHEYE error: " << result;
-
-   //init tracing
-   trace_init();
 
     return result;
   }
@@ -695,8 +725,6 @@ void TangoRosNode::OnPointCloudAvailable(const TangoPointCloud* point_cloud) {
 }
 
 void TangoRosNode::OnFrameAvailable(TangoCameraId camera_id, const TangoImageBuffer* buffer) {
-  trace_begin("OnFrameAvailable");
-
   if ((publisher_config_.publish_camera & CAMERA_FISHEYE) &&
        camera_id == TangoCameraId::TANGO_CAMERA_FISHEYE &&
        fisheye_image_available_mutex_.try_lock()) {
@@ -708,18 +736,22 @@ void TangoRosNode::OnFrameAvailable(TangoCameraId camera_id, const TangoImageBuf
     fisheye_image_available_.notify_all();
     fisheye_image_available_mutex_.unlock();
   }
+
   if ((publisher_config_.publish_camera & CAMERA_COLOR) &&
-       camera_id == TangoCameraId::TANGO_CAMERA_COLOR &&
-       color_image_available_mutex_.try_lock()) {
-    color_image_ = cv::Mat(buffer->height + buffer->height / 2, buffer->width,
-                           CV_8UC1, buffer->data, buffer->stride); // No deep copy.
-    color_image_header_.stamp.fromSec(buffer->timestamp + time_offset_);
-    color_image_header_.seq = buffer->frame_number;
-    color_image_header_.frame_id = toFrameId(TANGO_COORDINATE_FRAME_CAMERA_COLOR);
-    color_image_available_.notify_all();
-    color_image_available_mutex_.unlock();
+       camera_id == TangoCameraId::TANGO_CAMERA_COLOR){
+    static int counter = 0;
+    //trace_message("OnFrameAvailable:begin", counter);
+    if(color_image_available_mutex_.try_lock()) {
+        color_image_ = cv::Mat(buffer->height + buffer->height / 2, buffer->width,
+                               CV_8UC1, buffer->data, buffer->stride); // No deep copy.
+        color_image_header_.stamp.fromSec(buffer->timestamp + time_offset_);
+        color_image_header_.seq = buffer->frame_number;
+        color_image_header_.frame_id = toFrameId(TANGO_COORDINATE_FRAME_CAMERA_COLOR);
+        color_image_available_.notify_all();
+        color_image_available_mutex_.unlock();
+    }
+    //trace_message("OnFrameAvailable:end", counter++);
   }
-  trace_end();
 }
 
 void TangoRosNode::StartPublishing() {
@@ -834,17 +866,27 @@ void TangoRosNode::PublishFisheyeImage() {
   }
 }
 
+
 void TangoRosNode::PublishColorImage() {
   while(ros::ok()) {
     if (!run_threads_) {
       break;
     }
     {
+      static int counter0 = 0;
+      trace_message("PublishColorImage:begin", counter0);
+
+      static int counter1 = 0;
+      trace_message("PublishColorImage_lock:begin", counter1);
       std::unique_lock<std::mutex> lock(color_image_available_mutex_);
       color_image_available_.wait(lock);
+      trace_message("PublishColorImage_lock:end", counter1++);
       if ((publisher_config_.publish_camera & CAMERA_COLOR)) {
         // The Tango image encoding is not supported by ROS.
         // We need to convert it to RGB.
+        static int counter2 = 0;
+        trace_message("PublishColorImage_create_msg:begin", counter2);
+
         cv::Mat color_image_rgb;
         cv::cvtColor(color_image_, color_image_rgb, cv::COLOR_YUV420sp2BGRA);
         cv_bridge::CvImage cv_bridge_color_image;
@@ -855,16 +897,32 @@ void TangoRosNode::PublishColorImage() {
         color_camera_info_manager_->setCameraInfo(color_camera_info_);
         sensor_msgs::Image color_image_msg;
         cv_bridge_color_image.toImageMsg(color_image_msg);
-        color_camera_publisher_.publish(color_image_msg, color_camera_info_);
+        trace_message("PublishColorImage_create_msg:end", counter2++);
 
+        static int counter3 = 0;
+        trace_message("PublishColorImage_publish:begin", counter3);
+        color_camera_publisher_.publish(color_image_msg, color_camera_info_);
+        trace_message("PublishColorImage_publish:end", counter3++);
         if (color_rectified_image_publisher_.getNumSubscribers() > 0) {
+          static int counter4 = 0;
+          trace_message("rectifyImage:begin", counter4);
           color_camera_model_.rectifyImage(color_image_rgb, color_image_rect_);
+          trace_message("rectifyImage:end", counter4++);
+
+          static int counter5 = 0;
+          trace_message("package_rectifyImage:begin", counter5);
           sensor_msgs::ImagePtr image_rect = cv_bridge::CvImage(
               cv_bridge_color_image.header, cv_bridge_color_image.encoding,
               color_image_rect_).toImageMsg();
+          trace_message("package_rectifyImage:end", counter5++);
+
+          static int counter6 = 0;
+          trace_message("publish_rectifyImage:begin", counter6);
           color_rectified_image_publisher_.publish(image_rect);
+          trace_message("publish_rectifyImage:end", counter6++);
         }
       }
+      trace_message("PublishColorImage:end", counter0++);
     }
   }
 }
