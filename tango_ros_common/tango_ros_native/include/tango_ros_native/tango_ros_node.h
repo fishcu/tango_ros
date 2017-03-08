@@ -195,6 +195,8 @@ class TangoRosNode {
   cv::Mat color_image_;
   image_geometry::PinholeCameraModel color_camera_model_;
   cv::Mat color_image_rect_;
+
+  ros::Publisher color_image_publisher_;
 };
 }  // namespace tango_ros_native
 #endif  // TANGO_ROS_NODE_H_

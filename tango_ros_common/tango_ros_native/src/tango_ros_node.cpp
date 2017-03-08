@@ -28,6 +28,13 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <string.h>
+
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <sensor_msgs/CompressedImage.h>
+
+
 using namespace std;
 
 typedef struct {
@@ -418,6 +425,8 @@ TangoRosNode::TangoRosNode() : run_threads_(false) {
   } catch (const image_transport::Exception& e) {
     LOG(ERROR) << "Error while creating image transport publishers" << e.what();
   }
+
+  color_image_publisher_ = node_handle_.advertise<sensor_msgs::CompressedImage>("/adc/color/image_raw/compressed", queue_size, latching);
 }
 
 TangoRosNode::TangoRosNode(const PublisherConfiguration& publisher_config) :
@@ -744,6 +753,9 @@ void TangoRosNode::OnFrameAvailable(TangoCameraId camera_id, const TangoImageBuf
     if(color_image_available_mutex_.try_lock()) {
         color_image_ = cv::Mat(buffer->height + buffer->height / 2, buffer->width,
                                CV_8UC1, buffer->data, buffer->stride); // No deep copy.
+        //resize the image
+        //cv::resize(color_image_, color_image_, cv::Size(), 0.5, 0.5, cv::INTER_LINEAR);
+        //
         color_image_header_.stamp.fromSec(buffer->timestamp + time_offset_);
         color_image_header_.seq = buffer->frame_number;
         color_image_header_.frame_id = toFrameId(TANGO_COORDINATE_FRAME_CAMERA_COLOR);
@@ -889,6 +901,22 @@ void TangoRosNode::PublishColorImage() {
 
         cv::Mat color_image_rgb;
         cv::cvtColor(color_image_, color_image_rgb, cv::COLOR_YUV420sp2BGRA);
+        //measure compression time
+        sensor_msgs::CompressedImage compressed_image;
+        compressed_image.header = color_image_header_;
+        compressed_image.format = "jpeg";
+        static int counter7 = 0;
+        trace_message("compress:begin", counter7);
+        //vector<uchar> buf;
+        std::vector<int> params {CV_IMWRITE_JPEG_QUALITY, 90};
+        cv::imencode(".jpg", color_image_rgb, compressed_image.data, params);
+        trace_message("compress:end", counter7++);
+        static int counter8 = 0;
+        trace_message("publish:begin", counter8);
+        color_image_publisher_.publish(compressed_image);
+        trace_message("publish:end", counter8++);
+        LOG(ERROR) << "---------------------Compressed_image_size" << compressed_image.data.size();
+        //
         cv_bridge::CvImage cv_bridge_color_image;
         cv_bridge_color_image.header = color_image_header_;
         cv_bridge_color_image.encoding = sensor_msgs::image_encodings::BGRA8;
