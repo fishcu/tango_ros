@@ -399,7 +399,7 @@ void ComputeWarpMapsToRectifyFisheyeImage(
 
 namespace tango_ros_native {
 TangoRosNode::TangoRosNode() : run_threads_(false) {
-  const  uint32_t queue_size = 1;
+  const  uint32_t queue_size = 10;
   const bool latching = true;
   point_cloud_publisher_ =
       node_handle_.advertise<sensor_msgs::PointCloud2>(
@@ -426,7 +426,8 @@ TangoRosNode::TangoRosNode() : run_threads_(false) {
     LOG(ERROR) << "Error while creating image transport publishers" << e.what();
   }
 
-  color_image_publisher_ = node_handle_.advertise<sensor_msgs::CompressedImage>("/adc/color/image_raw/compressed", queue_size, latching);
+  color_image_publisher_ = node_handle_.advertise<sensor_msgs::CompressedImage>(publisher_config_.hfr_color_image_compressed_topic, queue_size, latching);
+  color_info_publisher_ = node_handle_.advertise<sensor_msgs::CameraInfo>(publisher_config_.hfr_color_camera_info_topic, queue_size, latching);
 }
 
 TangoRosNode::TangoRosNode(const PublisherConfiguration& publisher_config) :
@@ -771,35 +772,33 @@ void TangoRosNode::OnFrameAvailable(TangoCameraId camera_id, const TangoImageBuf
         color_image_available_mutex_.unlock();
     }*/
     //trace_message("OnFrameAvailable:end", counter++);
-    static unsigned int frame_counter;
-    if((frame_counter++ % 3) != 0)
+    static double last_timestamp = 0;
+    if((buffer->timestamp - last_timestamp) < (1.0/30.0*1.5))
     {
-        uint32_t frame_number = buffer->frame_number;
-        LOG(ERROR) << "//////// dropping frame:" << frame_number;
         return;
     }
+    last_timestamp = buffer->timestamp;
 
     int i;
     for(i=0; i< NUM_OF_THREADS; i++)
     {
         if(worker_image_available_mutex_[i].try_lock()) {
-        //worker is available
+        //worker thread is available
             color_image_ = cv::Mat(buffer->height + buffer->height / 2, buffer->width,
                                    CV_8UC1, buffer->data, buffer->stride); // No deep copy.
             worker_image_[i] = color_image_.clone();
             worker_image_header_[i].stamp.fromSec(buffer->timestamp + time_offset_);
-            worker_image_header_[i].seq = buffer->frame_number;
+            //worker_image_header_[i].seq = buffer->frame_number; //It is not required: http://answers.ros.org/question/55126/why-does-ros-overwrite-my-sequence-number/
             worker_image_header_[i].frame_id = toFrameId(TANGO_COORDINATE_FRAME_CAMERA_COLOR);
             worker_image_available_[i].notify_all();
             worker_image_available_mutex_[i].unlock();
-            uint32_t frame_number = buffer->frame_number;
-            LOG(ERROR) << "//////// Publishing frame:" << frame_number;
+            LOG(ERROR) << "************ assigned frame " << (unsigned int)(buffer->frame_number) << " to thread " << i;
             return;
         }
     }
     if(i == NUM_OF_THREADS)
     {
-        LOG(ERROR) << "************ misssed a color frame";
+        LOG(ERROR) << "************ missed a color frame";
     }
   }
 }
@@ -808,17 +807,12 @@ void TangoRosNode::StartPublishing() {
   run_threads_ = true;
   publish_device_pose_thread_ = std::thread(&TangoRosNode::PublishDevicePose, this);
   publish_pointcloud_thread_ = std::thread(&TangoRosNode::PublishPointCloud, this);
-  publish_laserscan_thread_ = std::thread(&TangoRosNode::PublishLaserScan, this);
+  //publish_laserscan_thread_ = std::thread(&TangoRosNode::PublishLaserScan, this);
   publish_fisheye_image_thread_ = std::thread(&TangoRosNode::PublishFisheyeImage, this);
-  publish_color_image_thread_ = std::thread(&TangoRosNode::PublishColorImage, this);
+  //publish_color_image_thread_ = std::thread(&TangoRosNode::PublishColorImage, this);
 
-  //
-  //worker_image_header_.resize(NUM_OF_THREADS);
-  //worker_image_.resize(NUM_OF_THREADS);
-  //worker_image_available_mutex_.resize(NUM_OF_THREADS);
-  //worker_image_available_.resize(NUM_OF_THREADS);
   for(int i=0; i < NUM_OF_THREADS; i++){
-    worker_color_image_thread_[i] = std::thread(&TangoRosNode::CompressImage, this, std::ref(TangoRosNode::worker_image_available_mutex_[i]), std::ref(TangoRosNode::worker_image_available_[i]), i);
+    worker_color_image_thread_[i] = std::thread(&TangoRosNode::CompressPublishImage, this, std::ref(TangoRosNode::worker_image_available_mutex_[i]), std::ref(TangoRosNode::worker_image_available_[i]), i);
   }
   ros_spin_thread_ = std::thread(&TangoRosNode::RunRosSpin, this);
 }
@@ -830,16 +824,17 @@ void TangoRosNode::StopPublishing() {
       publish_device_pose_thread_.join();
     if (publisher_config_.publish_point_cloud)
       publish_pointcloud_thread_.join();
-    if (publisher_config_.publish_laser_scan)
-      publish_laserscan_thread_.join();
+//    if (publisher_config_.publish_laser_scan)
+//      publish_laserscan_thread_.join();
     if (publisher_config_.publish_camera & CAMERA_FISHEYE)
       publish_fisheye_image_thread_.join();
-    if (publisher_config_.publish_camera & CAMERA_COLOR)
-      publish_color_image_thread_.join();
-    ros_spin_thread_.join();
-    for(int i=0; i < NUM_OF_THREADS; i++){
-        worker_color_image_thread_[i].join();
+    if (publisher_config_.publish_camera & CAMERA_COLOR){
+//      publish_color_image_thread_.join();
+        for(int i=0; i < NUM_OF_THREADS; i++){
+            worker_color_image_thread_[i].join();
+        }
     }
+    ros_spin_thread_.join();
   }
 }
 
@@ -928,40 +923,34 @@ void TangoRosNode::PublishFisheyeImage() {
   }
 }
 
-void TangoRosNode::CompressImage(std::mutex& color_image_available_mutex_, std::condition_variable& color_image_available_, int id){
+void TangoRosNode::CompressPublishImage(std::mutex& color_image_available_mutex_, std::condition_variable& color_image_available_, int id){
   while(ros::ok()) {
     if (!run_threads_) {
       break;
     }
-     //LOG(ERROR) << ">>>>>>>>>>>>>>>>>>>>>> entering" << id;
-     std::unique_lock<std::mutex> lock(color_image_available_mutex_);
-     color_image_available_.wait(lock);
+    std::unique_lock<std::mutex> lock(color_image_available_mutex_);
+    color_image_available_.wait(lock);
 
-     cv::Mat color_image_rgb;
-        //static int counter9 = 0;
-        //trace_message("clone:begin", counter9);
-        //cv::Mat A = color_image_.clone();
-        //trace_message("clone:end", counter9++);
-
+    if ((publisher_config_.publish_camera & CAMERA_COLOR)) {
+        //create compressed image message
+        cv::Mat color_image_rgb;
         cv::cvtColor(worker_image_[id], color_image_rgb, cv::COLOR_YUV420sp2BGRA);
         //measure compression time
         sensor_msgs::CompressedImage compressed_image;
         compressed_image.header = worker_image_header_[id];
         compressed_image.format = "jpeg";
-        //static int counter7 = 0;
-        //trace_message("compress:begin", counter7);
-        //vector<uchar> buf;
         std::vector<int> params {CV_IMWRITE_JPEG_QUALITY, 50};
         cv::imencode(".jpg", color_image_rgb, compressed_image.data, params);
-        //trace_message("compress:end", counter7++);
-        //static int counter8 = 0;
-        //trace_message("publish:begin", counter8);
+        //publish
         color_image_publisher_mutex_.lock();
         color_image_publisher_.publish(compressed_image);
         color_image_publisher_mutex_.unlock();
-        //trace_message("publish:end", counter8++);
-        //LOG(ERROR) << "---------------------Compressed_image_size" << compressed_image.data.size();
-     //LOG(ERROR) << ">>>>>>>>>>>>>>>>>>>>>> leaving" << id;
+        //publish camera info
+        color_info_publisher_mutex_.lock();
+        color_camera_info_.header = compressed_image.header;
+        color_info_publisher_.publish(color_camera_info_);
+        color_info_publisher_mutex_.unlock();
+    }
   }
 }
 
@@ -1012,8 +1001,8 @@ void TangoRosNode::PublishColorImage() {
         cv_bridge_color_image.header = color_image_header_;
         cv_bridge_color_image.encoding = sensor_msgs::image_encodings::BGRA8;
         cv_bridge_color_image.image = color_image_rgb;
-        color_camera_info_.header = color_image_header_;
-        color_camera_info_manager_->setCameraInfo(color_camera_info_);
+        //color_camera_info_.header = color_image_header_;
+        //color_camera_info_manager_->setCameraInfo(color_camera_info_);
         sensor_msgs::Image color_image_msg;
         cv_bridge_color_image.toImageMsg(color_image_msg);
         trace_message("PublishColorImage_create_msg:end", counter2++);

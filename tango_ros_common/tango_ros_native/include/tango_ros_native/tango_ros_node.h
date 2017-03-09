@@ -83,6 +83,10 @@ struct PublisherConfiguration {
   std::string color_rectified_image_topic = "tango/camera/color_1/image_rect";
   // Param name for the drift correction parameter.
   std::string enable_drift_correction_param = "tango/enable_drift_correction";
+
+  std::string hfr_color_image_compressed_topic = "tango/camera/rgb/image_raw/compressed";
+  std::string hfr_color_camera_info_topic = "tango/camera/rgb/camera_info";
+
 };
 
 // Node collecting tango data and publishing it on ros topics.
@@ -130,7 +134,7 @@ class TangoRosNode {
   // Function called when one of the dynamic reconfigure parameter is changed.
   // Updates the publisher configuration consequently.
   void DynamicReconfigureCallback(PublisherConfig &config, uint32_t level);
-  void CompressImage(std::mutex& color_image_available_mutex_, std::condition_variable& color_image_available_, int id);
+  void CompressPublishImage(std::mutex& color_image_available_mutex_, std::condition_variable& color_image_available_, int id);
 
   TangoConfig tango_config_;
   ros::NodeHandle node_handle_;
@@ -199,15 +203,17 @@ class TangoRosNode {
   cv::Mat color_image_rect_;
 
   ros::Publisher color_image_publisher_;
+  ros::Publisher color_info_publisher_;
   std::atomic<uint32_t> thread_counter{0};
 
-  #define NUM_OF_THREADS 3
+  #define NUM_OF_THREADS 5
   std_msgs::Header worker_image_header_[NUM_OF_THREADS];
   cv::Mat worker_image_[NUM_OF_THREADS];
   std::mutex worker_image_available_mutex_[NUM_OF_THREADS];
   std::condition_variable worker_image_available_[NUM_OF_THREADS];
   std::thread worker_color_image_thread_[NUM_OF_THREADS];
   std::mutex color_image_publisher_mutex_;
+  std::mutex color_info_publisher_mutex_;
 };
 }  // namespace tango_ros_native
 #endif  // TANGO_ROS_NODE_H_f
