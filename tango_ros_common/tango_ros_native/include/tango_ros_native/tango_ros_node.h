@@ -130,7 +130,7 @@ class TangoRosNode {
   // Function called when one of the dynamic reconfigure parameter is changed.
   // Updates the publisher configuration consequently.
   void DynamicReconfigureCallback(PublisherConfig &config, uint32_t level);
-
+  void CompressImage(std::mutex& color_image_available_mutex_, std::condition_variable& color_image_available_, int id);
 
   TangoConfig tango_config_;
   ros::NodeHandle node_handle_;
@@ -154,6 +154,8 @@ class TangoRosNode {
   std::condition_variable fisheye_image_available_;
   std::mutex color_image_available_mutex_;
   std::condition_variable color_image_available_;
+
+
 
   double time_offset_ = 0.; // Offset between tango time and ros time in s.
 
@@ -197,6 +199,15 @@ class TangoRosNode {
   cv::Mat color_image_rect_;
 
   ros::Publisher color_image_publisher_;
+  std::atomic<uint32_t> thread_counter{0};
+
+  #define NUM_OF_THREADS 3
+  std_msgs::Header worker_image_header_[NUM_OF_THREADS];
+  cv::Mat worker_image_[NUM_OF_THREADS];
+  std::mutex worker_image_available_mutex_[NUM_OF_THREADS];
+  std::condition_variable worker_image_available_[NUM_OF_THREADS];
+  std::thread worker_color_image_thread_[NUM_OF_THREADS];
+  std::mutex color_image_publisher_mutex_;
 };
 }  // namespace tango_ros_native
-#endif  // TANGO_ROS_NODE_H_
+#endif  // TANGO_ROS_NODE_H_f
