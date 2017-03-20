@@ -520,6 +520,7 @@ TangoErrorType TangoRosNode::TangoSetupConfig() {
 
   bool enable_drift_correction;
   node_handle_.param(publisher_config_.enable_drift_correction_param, enable_drift_correction, true);
+  enable_drift_correction = false; //disable drift correction by default
   const char* config_enable_drift_correction = "config_enable_drift_correction";
   result = TangoConfig_setBool(tango_config_, config_enable_drift_correction, enable_drift_correction);
   if(result != TANGO_SUCCESS) {
