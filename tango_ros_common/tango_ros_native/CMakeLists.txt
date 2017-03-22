@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(tango_ros_native)
 add_compile_options(-std=c++11)
-set(CMAKE_CXX_FLAGS "-Wunused-parameter -Wunused-variable")
- 
+set(CMAKE_CXX_FLAGS "-Wno-unused-parameter -Wno-unused-variable")
+
 find_package(catkin REQUIRED COMPONENTS
    dynamic_reconfigure
    glog_catkin
+   image_geometry
    roscpp
    sensor_msgs
    tango_client_api
@@ -14,8 +15,12 @@ find_package(catkin REQUIRED COMPONENTS
    tf2_ros
    )
 
-find_package(cmake_modules REQUIRED)
-find_package(OpenCV 2 REQUIRED)
+# Use OpenCV3 if we are using ROS Kinetic (which is the default for that distro)
+if( $ENV{ROS_DISTRO} STRLESS "kinetic")
+  find_package(OpenCV 2 REQUIRED)
+else()
+  find_package(OpenCV 3 REQUIRED)
+endif()
 
 generate_dynamic_reconfigure_options(
   cfg/Publisher.cfg
@@ -23,7 +28,7 @@ generate_dynamic_reconfigure_options(
 
 catkin_package(
   INCLUDE_DIRS include
-  CATKIN_DEPENDS dynamic_reconfigure glog_catkin roscpp sensor_msgs tango_client_api tango_support_api tf tf2_ros
+  CATKIN_DEPENDS dynamic_reconfigure glog_catkin image_geometry roscpp sensor_msgs tango_client_api tango_support_api tf tf2_ros
   LIBRARIES tango_ros_native
   DEPENDS OpenCV
   )
