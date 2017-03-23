@@ -271,7 +271,9 @@ void toDepthImage(const TangoPointCloud& tango_point_cloud,
                             double last_color_timestamp,
                             double time_offset,
                             sensor_msgs::Image* depth_image,
-                            image_geometry::PinholeCameraModel* color_camera_model) {
+                            image_geometry::PinholeCameraModel* color_camera_model,
+                            const sensor_msgs::CameraInfo& color_camera_info,
+                            const sensor_msgs::CameraInfo& depth_camera_info) {
 
     TangoPoseData pose_color_image_t1_T_depth_image_t0;
     TangoErrorType retval;
@@ -285,13 +287,23 @@ void toDepthImage(const TangoPointCloud& tango_point_cloud,
                << " depth cameras.";
     return;
   }
+	
+  // color_camera_info_ is initialized with tango services, so can assume
+  // that these values are valid.
+  int color_image_width = color_camera_info.width;
+  int color_image_height = color_camera_info.height;
 
-  double scale_factor = 1.0/8.0;
   cv::Mat color_image_t1_T_depth_image_t0 = GetMatrixFromPose(&pose_color_image_t1_T_depth_image_t0);
   int point_cloud_size = tango_point_cloud.num_points;
-  int image_width = 1920 * scale_factor; //color_camera_model->width();
-  int image_height = 1080 * scale_factor; //color_camera_model->height();
+  int image_width = depth_camera_info.width;
+  int image_height = depth_camera_info.height;
   int image_size = image_height * image_width;
+
+  if(image_width * color_image_height != image_height * color_image_width) {
+    LOG(ERROR) << "Aspect ratio of color and depth images do not agree!\n";
+    return;
+  }
+  double scale_factor = double(image_width)/color_image_width;
 
   depth_image->data.resize(image_size*4);
   std::fill(depth_image->data.begin(), depth_image->data.end(), 0);
@@ -358,6 +370,10 @@ void toCameraInfo(const TangoCameraIntrinsics& camera_intrinsics,
         camera_intrinsics.distortion[1], camera_intrinsics.distortion[2],
         camera_intrinsics.distortion[3], camera_intrinsics.distortion[4]};
   } else if (camera_intrinsics.camera_id == TangoCameraId::TANGO_CAMERA_COLOR) {
+    camera_info->distortion_model = sensor_msgs::distortion_models::RATIONAL_POLYNOMIAL;
+    camera_info->D = {camera_intrinsics.distortion[0],
+        camera_intrinsics.distortion[1], 0., 0., camera_intrinsics.distortion[2]};
+  } else if (camera_intrinsics.camera_id == TangoCameraId::TANGO_CAMERA_DEPTH) {
     camera_info->distortion_model = sensor_msgs::distortion_models::RATIONAL_POLYNOMIAL;
     camera_info->D = {camera_intrinsics.distortion[0],
         camera_intrinsics.distortion[1], 0., 0., camera_intrinsics.distortion[2]};
@@ -526,6 +542,9 @@ TangoErrorType TangoRosNode::OnTangoServiceConnected() {
   color_camera_info_manager_->setCameraName("color_1");
   // Cache camera model for more efficiency.
   color_camera_model_.fromCameraInfo(color_camera_info_);
+
+  TangoService_getCameraIntrinsics(TANGO_CAMERA_DEPTH, &tango_camera_intrinsics);
+  toCameraInfo(tango_camera_intrinsics, &depth_camera_info_);
 
   return TANGO_SUCCESS;
 }
@@ -766,7 +785,8 @@ void TangoRosNode::OnPointCloudAvailable(const TangoPointCloud* point_cloud) {
     }
 
     if(publisher_config_.publish_depth && depth_image_available_mutex_.try_lock()) {
-        toDepthImage(*point_cloud, last_color_timestamp, time_offset_, &depth_image_msg_, &color_camera_model_);
+        toDepthImage(*point_cloud, last_color_timestamp, time_offset_, &depth_image_msg_,
+          &color_camera_model_, color_camera_info_, depth_camera_info_);
         depth_image_available_.notify_all();
         depth_image_available_mutex_.unlock();
     }

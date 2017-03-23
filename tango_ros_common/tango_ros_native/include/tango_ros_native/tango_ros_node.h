@@ -225,6 +225,7 @@ class TangoRosNode {
   //depth image
   std::atomic<double> color_timestamp_;
   double last_color_timestamp_;
+  sensor_msgs::CameraInfo depth_camera_info_;
   sensor_msgs::Image depth_image_msg_;
   ros::Publisher depth_image_publisher_;
 
